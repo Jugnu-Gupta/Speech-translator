@@ -1,42 +1,3 @@
-// import express from "express";
-// import cookieParser from "cookie-parser";
-// import cors from "cors";
-// const app = express();
-// import dotenv from "dotenv";
-// dotenv.config();
-
-// app.use(cors({ origin: process.env.CORS_ORIGIN, credentials: true }));
-// app.use(express.urlencoded({ extended: true, limit: "5mb" }));
-// app.use(express.json({ limit: "5mb" }));
-// app.use(express.static("tmp"));
-// app.use(cookieParser());
-
-// // routes import
-// import authRouter from "./routes/auth.route";
-// import userRouter from "./routes/user.route";
-// import likeRouter from "./routes/like.route";
-// import videoRouter from "./routes/video.route";
-// import tweetRouter from "./routes/tweet.route";
-// import commentRouter from "./routes/comment.route";
-// import playlistRouter from "./routes/playlist.route";
-// import dashboardRouter from "./routes/dashboard.route";
-// import healthCheckRouter from "./routes/healthCheck.route";
-// import subscriptionRouter from "./routes/subscription.route";
-
-// // routes declaration/mount
-// app.use("/api/v1/auths", authRouter);
-// app.use("/api/v1/users", userRouter);
-// app.use("/api/v1/likes", likeRouter);
-// app.use("/api/v1/videos", videoRouter);
-// app.use("/api/v1/tweets", tweetRouter);
-// app.use("/api/v1/comments", commentRouter);
-// app.use("/api/v1/playlists", playlistRouter);
-// app.use("/api/v1/dashboard", dashboardRouter);
-// app.use("/api/v1/healthCheck", healthCheckRouter);
-// app.use("/api/v1/subscriptions", subscriptionRouter);
-
-// export { app };
-
 import express from "express";
 import multer from "multer";
 import cors from "cors";
@@ -44,6 +5,7 @@ import { OpenAI } from "openai";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 
 // Load environment variables
 dotenv.config();
@@ -56,28 +18,76 @@ const app = express();
 const upload = multer({ dest: path.join(__dirname, "uploads/") });
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-app.use(cors());
+app.use(cors({
+	origin: process.env.CORS_ORIGIN || "*",
+	credentials: true,
+}));
 app.use(express.json());
 
-app.post("/transcribe", upload.single("audio"), async (req, res) => {
+// POST /api/v1/audio-chunk
+// Receives an audio chunk (multipart/form-data, field: "audio")
+// Optionally receives a "targetLang" field for translation (e.g., "en", "es", "fr")
+app.post("/api/v1/audio-chunk", upload.single("audio"), async (req, res) => {
 	try {
 		const audioFile = req.file;
+		const targetLang = req.body.targetLang || "en";
+
+		if (!audioFile) {
+			return res.status(400).json({ error: "No audio file uploaded" });
+		}
+
+		// OpenAI Whisper expects a readable stream or file path
+		// The multer file object has a .path property
 		const transcription = await openai.audio.transcriptions.create({
-			file: audioFile,
+			file: fs.createReadStream(audioFile.path),
 			model: "whisper-1",
 			response_format: "json",
-			language: "auto", // optional
+			language: "auto",
+		});
+
+		const transcript = transcription.text;
+		const detectedLanguage = transcription.language || null;
+
+		// Now translate the transcript to the target language
+		// Use OpenAI Chat API for translation
+		let translation = "";
+		try {
+			const chatCompletion = await openai.chat.completions.create({
+				model: "gpt-3.5-turbo",
+				messages: [
+					{
+						role: "system",
+						content: `You are a translation assistant. Translate the following text to ${targetLang}. Only return the translation, no explanation.`,
+					},
+					{
+						role: "user",
+						content: transcript,
+					},
+				],
+				temperature: 0.2,
+			});
+			translation = chatCompletion.choices[0].message.content.trim();
+		} catch (translationError) {
+			console.error("Translation error:", translationError);
+			translation = "";
+		}
+
+		// Clean up uploaded file
+		fs.unlink(audioFile.path, (err) => {
+			if (err) console.error("Failed to delete uploaded file:", err);
 		});
 
 		res.json({
-			transcript: transcription.text,
-			language: transcription.language,
+			transcript,
+			detectedLanguage,
+			translation,
+			targetLanguage: targetLang,
 		});
 	} catch (error) {
 		console.error(error);
-		res.status(500).send("Whisper transcription failed");
+		res.status(500).json({ error: "Whisper transcription or translation failed" });
 	}
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
